@@ -1,11 +1,11 @@
 # Glob: **/*
 # Regla: 10-tech-stack (Always On)
 
-
 # Tech Stack y Políticas de Seguridad
 
 > Regla siempre activa. Define QUÉ tecnologías se usan y QUÉ está prohibido.
 > El estilo de código (nombres, formato, estructura de funciones) está en `20-coding-standards.md`.
+> Las reglas tácticas por app están en `40-backend.md` y `50-webapp.md`.
 > Si una tarea requiere algo que no está en este documento, DETENTE y propón el cambio
 > en el `plan.md` de la feature antes de implementarlo.
 
@@ -34,6 +34,8 @@ Producción:   Navegador ──► Fastify ──┬── /api/* → rutas de l
 
 - Frontend y API se sirven SIEMPRE desde el mismo origen. No se configura CORS para el navegador.
 - En producción no existe servidor de Vite; Fastify sirve `apps/webapp/dist` con `@fastify/static`.
+- En desarrollo, Vite NO aplica las cabeceras de Helmet (CSP incluida). Lo que funciona en dev
+  puede romperse en producción: ver verificación de CSP en `50-webapp.md` §8.
 
 ---
 
@@ -45,11 +47,11 @@ Producción:   Navegador ──► Fastify ──┬── /api/* → rutas de l
 |---|---|---|
 | Runtime | Node.js 24 LTS | Fijar en `.nvmrc` y `engines` |
 | Lenguaje | TypeScript (modo `strict`) | En backend, frontend y paquetes |
-| Gestor de paquetes | pnpm | Usar `pnpm`; nunca `npm` ni `yarn` |
+| Gestor de paquetes | pnpm | Usar `pnpm` y `pnpm exec`; PROHIBIDO `npm`, `npx` y `yarn` |
 | Monorepo | Turborepo | Tareas: `dev`, `build`, `test`, `lint`, `typecheck` |
 | Lint y formato | Biome | Única herramienta de lint/format. No añadir ESLint ni Prettier |
 | Tests | Vitest | Backend y frontend |
-| Base de datos local | PostgreSQL vía `docker-compose.yml` | Misma versión mayor que producción |
+| Base de datos local | PostgreSQL vía `docker-compose.yml` | Misma versión mayor que producción. Una base de pruebas separada (nombre terminado en `_test`) |
 
 ### 2.2 Backend (`apps/backend`)
 
@@ -77,8 +79,14 @@ Producción:   Navegador ──► Fastify ──┬── /api/* → rutas de l
 | Build y dev server | `vite` (dev) | Bundling, hash de assets, proxy `/api` en desarrollo |
 | Router | Propio (`src/router.ts`, History API) | Sin librerías de routing |
 | Estado | Módulo propio simple (`src/state.ts`) | Sin librerías de estado |
-| HTTP | `fetch` nativo envuelto en `src/api/` | Respuestas validadas con `shared-contracts` |
+| HTTP | `fetch` nativo envuelto en `src/api/client.ts` | Respuestas validadas con `shared-contracts` |
 | Tests | `vitest` + `happy-dom` | Tests de componentes y lógica |
+| Guía web moderna | `modern-web-guidance` (devDependency, versión fija) | Consulta y `legacy-scan`; se ejecuta con `pnpm exec`. Ver `50-webapp.md` |
+| Gráficos | `chart.js` (versión fija) | Donas, barras, líneas y radar con tooltips. Solo módulos registrados explícitamente; sin wrappers de terceros |
+
+**Objetivo de navegadores:** Baseline *widely available*. `build.target` de Vite debe reflejarlo.
+Solo se usan APIs nativas que entren en ese criterio; si una API más nueva aporta valor real
+(por ejemplo `field-sizing`), requiere justificación en el `plan.md`.
 
 ### 2.4 Shared (`packages/shared-contracts`)
 
@@ -96,6 +104,7 @@ apps/backend/src/
 │   ├── <dominio>.routes.ts       # HTTP: valida entrada, llama al service, responde
 │   ├── <dominio>.service.ts      # Lógica de negocio y AUTORIZACIÓN
 │   └── <dominio>.repository.ts   # Único lugar con acceso a Drizzle
+├── errors/                       # DomainError (clase base con `code`) y errores por dominio
 ├── db/
 │   ├── schema/                   # Tablas en TS (code first)
 │   ├── migrations/               # Generadas por drizzle-kit, versionadas en git
@@ -112,7 +121,10 @@ apps/webapp/
     ├── main.ts
     ├── router.ts
     ├── state.ts
-    ├── api/                      # Clientes fetch por dominio
+    ├── api/
+    │   ├── client.ts             # Único lugar con fetch: validación, ApiError, refresh
+    │   ├── error-messages.ts     # code → mensaje en español
+    │   └── <dominio>.api.ts      # Clientes por dominio
     ├── pages/                    # Una función por página → HTMLElement
     ├── components/               # Funciones que crean elementos DOM
     ├── lib/dom.ts                # Helper h() para crear elementos de forma segura
@@ -138,11 +150,31 @@ Reglas de capas en el backend:
   2. `pnpm --filter backend db:generate` → genera la migración SQL.
   3. Revisar el SQL generado antes de aplicarlo.
   4. `pnpm --filter backend db:migrate`.
-- Prohibido editar a mano migraciones ya aplicadas y prohibido usar `drizzle-kit push`
-  fuera de entornos locales desechables.
+- Prohibido editar a mano migraciones y prohibido usar `drizzle-kit push`, también en local.
+  Única excepción: `drizzle-kit generate --custom` cuando el `plan.md` lo justifique
+  (extensiones, datos iniciales).
 - Toda tabla incluye `id` (UUID), `created_at` y `updated_at`.
 - Usar restricciones en la base de datos (`NOT NULL`, `UNIQUE`, `FOREIGN KEY`, `CHECK`),
   no solo validación en código.
+
+### Índices
+
+- Todo índice se declara en el esquema TS (`src/db/schema/*.ts`), en el tercer argumento
+  de `pgTable`, con nombre explícito. Prohibido crearlos con SQL a mano.
+- Un índice nace de una consulta o regla de negocio concreta, documentada en la sección
+  "Índices" del `plan.md`. Sin consulta que lo justifique, no se crea.
+- `PRIMARY KEY` y `UNIQUE` ya crean su propio índice: no se duplican. Si la unicidad es una
+  regla de negocio, usar `unique()` en lugar de un índice aparte.
+- Toda `FOREIGN KEY` lleva índice explícito (PostgreSQL no lo crea solo), salvo que el
+  `plan.md` justifique lo contrario. Los filtros por propietario (`user_id`) lo requieren.
+- Índices compuestos: primero las columnas con igualdad, después las de rango u ordenamiento.
+- Índices parciales o de expresión (por ejemplo `lower(email)`) solo si la spec lo exige.
+- Antes de aprobar un índice no trivial, comprobar la consulta con `EXPLAIN (ANALYZE)` sobre
+  un volumen de datos razonable y resumir el resultado en `plan.md`.
+- Tabla con datos en producción: crear el índice con `CREATE INDEX CONCURRENTLY` mediante
+  `drizzle-kit generate --custom`, justificado en `plan.md`. Es una de las excepciones
+  permitidas al SQL manual. Cambiar o eliminar un índice ya aplicado se hace con una
+  migración nueva, nunca editando la anterior.
 
 ---
 
@@ -177,6 +209,8 @@ Reglas:
   explícita de rutas públicas en `plugins/auth.ts`.
 - La autorización se comprueba en la capa `service`, nunca solo en el frontend.
 - Toda consulta de un recurso de usuario filtra por el propietario (prevención de IDOR).
+- Acceso a un recurso ajeno devuelve `404` (no revela su existencia). `403` se reserva para
+  falta de rol sobre una acción conocida.
 - Los roles se leen del token verificado, nunca de datos enviados por el cliente.
 
 ### 5.3 Validación de entrada
@@ -217,6 +251,7 @@ Reglas:
 - HSTS activo en producción.
 - CSRF: además de `SameSite` en las cookies, toda petición `POST`, `PUT`, `PATCH` o `DELETE`
   autenticada por cookie verifica que la cabecera `Origin` coincida con el origen configurado.
+  La verificación vive en un único plugin, no por ruta.
 - No se habilita CORS para orígenes de navegador. Si en el futuro hace falta, se define
   una lista blanca explícita en el `plan.md` de la feature (nunca `*` con credenciales).
 
@@ -229,6 +264,8 @@ Reglas:
 
 - Un único manejador global de errores en `plugins/error-handler.ts` que responde con el
   formato `ApiError` de `shared-contracts`.
+- Entrada que no cumple el esquema → `422`. Error de serialización de la respuesta → `500`
+  genérico, sin detalles.
 - En producción nunca se devuelven stack traces, mensajes de la base de datos ni rutas internas.
 - Redaction obligatoria en pino para: `password`, `token`, `accessToken`, `refreshToken`,
   `authorization`, `cookie`, `set-cookie`.
@@ -237,7 +274,7 @@ Reglas:
 ### 5.9 Secretos y configuración
 
 - Los secretos solo se leen de variables de entorno (Node `--env-file` en local).
-- `.env` en `.gitignore`. Mantener `.env.example` con todas las claves y sin valores reales.
+- `.env` y `.env.test` en `.gitignore`. Mantener `.env.example` con todas las claves y sin valores reales.
 - PROHIBIDO escribir secretos, tokens o contraseñas en el código, los tests, los logs o los
   archivos de `specs/`.
 
@@ -260,8 +297,10 @@ Reglas:
 | Levantar todo | `pnpm dev` |
 | Solo backend | `pnpm turbo run dev --filter=backend` |
 | Solo webapp | `pnpm turbo run dev --filter=webapp` |
+| Build de una app | `pnpm turbo run build --filter=<app>` |
 | Tests de una app | `pnpm turbo run test --filter=<app>` |
-| Verificar lo afectado | `pnpm turbo run lint typecheck test --filter=...[origin/main]` |
+| Verificar una app | `pnpm turbo run lint typecheck test --filter=<app>` |
+| Verificar todo lo afectado | `pnpm turbo run lint typecheck test --filter=...[origin/main]` |
 | Añadir dependencia | `pnpm add <pkg> --filter <app>` (solo si cumple 5.10) |
 | Generar migración | `pnpm --filter backend db:generate` |
 | Aplicar migraciones | `pnpm --filter backend db:migrate` |
@@ -271,14 +310,10 @@ Reglas:
 
 ## 7. Definición de "terminado" (técnica)
 
-### Para marcar una tarea `[x]` en `tasks.md`:
-1. `pnpm turbo run lint typecheck test --filter=<paquete-de-la-tarea>` pasa sin errores.
-2. Si la tarea toca `apps/webapp`, `npx modern-web-guidance legacy-scan apps/webapp/` pasa sin antipatrones legacy.
-3. No introduce dependencias fuera de este documento (o están aprobadas en `plan.md`).
-4. Cumple todas las políticas de la sección 5 aplicables.
-5. Los endpoints nuevos incluyen tests de: caso feliz, entrada inválida (422) y falta de autenticación o autorización (401/403).
-
-### Para dar por cerrada la feature completa (Fase Close):
-1. Todas las tareas de `tasks.md` están en `[x]`.
-2. `pnpm turbo run lint typecheck test --filter=...[origin/main]` pasa en todos los paquetes afectados y sus dependientes.
-3. Todos los criterios de aceptación (`AC-n`) de `spec.md` cuentan con pruebas automatizadas verificadas.
+Única fuente de esta definición. Una tarea solo se marca `[x]` en `tasks.md` cuando:
+1. `lint`, `typecheck` y `test` pasan para la app afectada, con 0 errores y 0 warnings.
+2. No introduce dependencias fuera de este documento (o están justificadas en `plan.md`).
+3. Cumple todas las políticas de la sección 5 aplicables.
+4. Los endpoints nuevos tienen tests de: caso feliz, entrada inválida (422) y falta de
+   autenticación o autorización (401 y 404/403).
+5. Cumple los criterios adicionales de su app: `40-backend.md` §7 y `50-webapp.md` §8.

@@ -17,6 +17,9 @@
 * **Clases de Error:** `PascalCase` con sufijo `Error` (`InvalidCredentialsError`, `AccountLockedError`).
 * **Constantes globales y variables de entorno:** `UPPER_SNAKE_CASE`.
 * **Archivos y directorios:** `kebab-case` para todos los nombres de archivo y carpetas (`user-profile.ts`, `auth-form.css`).
+* **Índices y restricciones de base de datos:** `idx_<tabla>_<columnas>` para índices e
+  `uq_<tabla>_<columnas>` para restricciones únicas (`idx_tasks_user_id_created_at`).
+  Nombre siempre explícito en el esquema.
 
 ## 3. Estructura de Funciones y Módulos
 * **Funciones sobre Clases:** Preferir funciones puras y módulos ES sobre clases con estado. Reservar `class` únicamente para errores personalizados o adaptadores que requieran ciclo de vida.
